@@ -1,119 +1,117 @@
 const express = require('express');
 const router = express.Router();
-const { v4: uuidv4 } = require('uuid');
 const redis = require('../config/redis');
+const { v4: uuidv4 } = require('uuid');
 
-// Add a new question
+// Create a new question
 router.post('/', async (req, res) => {
   try {
-    const { session_id, content, nickname, is_anonymous } = req.body;
-    const questionId = uuidv4();
-    const question = {
-      id: questionId,
-      sessionId: session_id,
-      content,
-      nickname: is_anonymous ? null : nickname,
-      isAnonymous: is_anonymous,
-      isAnswered: false,
-      upvoteCount: 0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
+    const { sessionSlug, content, nickname, is_anonymous } = req.body;
 
-    // Get session slug from session id
-    const sessions = await redis.keys('session:*');
-    let sessionSlug;
-    for (const sessionKey of sessions) {
-      const sessionData = await redis.hgetall(sessionKey);
-      if (sessionData.id === session_id) {
-        sessionSlug = sessionKey.split(':')[1];
-        break;
-      }
-    }
-
-    if (!sessionSlug) {
+    // Validate session exists
+    const session = await redis.hgetall(`session:${sessionSlug}`);
+    if (!session || Object.keys(session).length === 0) {
       return res.status(404).json({ error: 'Session not found' });
     }
 
-    // Store question in Redis
-    await redis.hset(`question:${questionId}`, question);
-    // Add question to session's question set
-    await redis.sadd(`session:${sessionSlug}:questions`, questionId);
+    // Create question object
+    const question = {
+      id: uuidv4(),
+      content,
+      nickname: is_anonymous ? null : nickname,
+      is_anonymous,
+      is_answered: false,
+      upvote_count: 0,
+      created_at: new Date().toISOString()
+    };
 
-    res.json(question);
-  } catch (err) {
-    console.error('Error creating question:', err);
+    // Add question to the session's question list
+    await redis.lpush(`session:${sessionSlug}:questions`, JSON.stringify(question));
+
+    res.status(201).json(question);
+  } catch (error) {
+    console.error('Error creating question:', error);
     res.status(500).json({ error: 'Error creating question' });
   }
 });
 
 // Upvote a question
-router.post('/:id/upvote', async (req, res) => {
+router.post('/:questionId/upvote', async (req, res) => {
   try {
-    const { id } = req.params;
-    const { client_id } = req.body;
+    const { questionId } = req.params;
+    const { clientId, sessionSlug } = req.body;
 
-    // Check if question exists
-    const question = await redis.hgetall(`question:${id}`);
-    if (!question || Object.keys(question).length === 0) {
+    // Get all questions for the session
+    const questionsData = await redis.lrange(`session:${sessionSlug}:questions`, 0, -1);
+    const questions = questionsData.map(q => JSON.parse(q));
+    
+    // Find the target question
+    const questionIndex = questions.findIndex(q => q.id === questionId);
+    if (questionIndex === -1) {
       return res.status(404).json({ error: 'Question not found' });
     }
 
-    // Check if user already voted
-    const hasVoted = await redis.sismember(`question:${id}:upvotes`, client_id);
-    if (hasVoted) {
-      return res.status(400).json({ error: 'Already voted' });
+    // Check if user has already upvoted
+    const upvoteKey = `upvote:${questionId}:${clientId}`;
+    const hasUpvoted = await redis.exists(upvoteKey);
+
+    if (hasUpvoted) {
+      // Remove upvote
+      await redis.del(upvoteKey);
+      questions[questionIndex].upvote_count--;
+    } else {
+      // Add upvote
+      await redis.set(upvoteKey, '1');
+      questions[questionIndex].upvote_count++;
     }
 
-    // Add upvote and increment count
-    await redis.sadd(`question:${id}:upvotes`, client_id);
-    await redis.hincrby(`question:${id}`, 'upvoteCount', 1);
+    // Update question in Redis
+    await redis.lset(
+      `session:${sessionSlug}:questions`,
+      questionIndex,
+      JSON.stringify(questions[questionIndex])
+    );
 
-    // Get updated question
-    const updatedQuestion = await redis.hgetall(`question:${id}`);
-    const upvotes = await redis.smembers(`question:${id}:upvotes`);
-
+    // Return updated question with hasUpvoted status
     res.json({
-      ...updatedQuestion,
-      upvoteCount: parseInt(updatedQuestion.upvoteCount),
-      isAnswered: updatedQuestion.isAnswered === 'true',
-      isAnonymous: updatedQuestion.isAnonymous === 'true',
-      upvotes: upvotes.map(clientId => ({ questionId: id, clientId }))
+      ...questions[questionIndex],
+      hasUpvoted: !hasUpvoted
     });
-  } catch (err) {
-    console.error('Error upvoting question:', err);
+  } catch (error) {
+    console.error('Error upvoting question:', error);
     res.status(500).json({ error: 'Error upvoting question' });
   }
 });
 
 // Mark question as answered
-router.patch('/:id/answer', async (req, res) => {
+router.patch('/:questionId/answer', async (req, res) => {
   try {
-    const { id } = req.params;
+    const { questionId } = req.params;
+    const { sessionSlug } = req.body;
 
-    // Check if question exists
-    const question = await redis.hgetall(`question:${id}`);
-    if (!question || Object.keys(question).length === 0) {
+    // Get all questions for the session
+    const questionsData = await redis.lrange(`session:${sessionSlug}:questions`, 0, -1);
+    const questions = questionsData.map(q => JSON.parse(q));
+    
+    // Find the target question
+    const questionIndex = questions.findIndex(q => q.id === questionId);
+    if (questionIndex === -1) {
       return res.status(404).json({ error: 'Question not found' });
     }
 
     // Update question
-    await redis.hset(`question:${id}`, 'isAnswered', 'true');
-    await redis.hset(`question:${id}`, 'updatedAt', new Date().toISOString());
+    questions[questionIndex].is_answered = true;
 
-    // Get updated question with upvotes
-    const updatedQuestion = await redis.hgetall(`question:${id}`);
-    const upvotes = await redis.smembers(`question:${id}:upvotes`);
+    // Update in Redis
+    await redis.lset(
+      `session:${sessionSlug}:questions`,
+      questionIndex,
+      JSON.stringify(questions[questionIndex])
+    );
 
-    res.json({
-      ...updatedQuestion,
-      upvoteCount: parseInt(updatedQuestion.upvoteCount),
-      isAnswered: updatedQuestion.isAnswered === 'true',
-      isAnonymous: updatedQuestion.isAnonymous === 'true',
-      upvotes: upvotes.map(clientId => ({ questionId: id, clientId }))
-    });
-  } catch (err) {
-    console.error('Error marking question as answered:', err);
+    res.json(questions[questionIndex]);
+  } catch (error) {
+    console.error('Error marking question as answered:', error);
     res.status(500).json({ error: 'Error marking question as answered' });
   }
 });

@@ -15,14 +15,15 @@
     "pm2:monit": "pm2 monit"
   },
   "dependencies": {
+    "axios": "^1.7.9",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
+    "ioredis": "^5.3.2",
     "node-cron": "^3.0.3",
-    "uuid": "^9.0.1",
-    "ioredis": "^5.3.2"
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
   }
-} 
+}

@@ -1,29 +1,39 @@
 const express = require('express');
 const router = express.Router();
-const { v4: uuidv4 } = require('uuid');
 const redis = require('../config/redis');
+const { v4: uuidv4 } = require('uuid');
+const statsService = require('../services/statsService');
+
+// Initialize stats when app starts
+statsService.initializeStats().catch(console.error);
+
+// Get stats
+router.get('/stats', async (req, res) => {
+  try {
+    const stats = await statsService.getStats();
+    res.json(stats);
+  } catch (error) {
+    console.error('Error fetching stats:', error);
+    res.status(500).json({ error: 'Error fetching stats' });
+  }
+});
 
 // Create a new session
 router.post('/', async (req, res) => {
   try {
-    const sessionId = uuidv4();
-    const slug = uuidv4().slice(0, 8);
-    const session = {
-      id: sessionId,
-      slug,
-      title: req.body.title || null,
+    const slug = uuidv4().slice(0, 32);
+    await redis.hset(`session:${slug}`, {
+      title: req.body.title || '',
       createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-
-    // Store session in Redis
-    await redis.hset(`session:${slug}`, session);
-    // Store session slug in a set for cleanup
-    await redis.zadd('sessions', Date.now(), slug);
-
-    res.json(session);
-  } catch (err) {
-    console.error('Error creating session:', err);
+      participantCount: '0'
+    });
+    
+    // Increment total sessions using stats service
+    await statsService.incrementStats('session');
+    
+    res.json({ slug });
+  } catch (error) {
+    console.error('Error creating session:', error);
     res.status(500).json({ error: 'Error creating session' });
   }
 });
@@ -32,50 +42,57 @@ router.post('/', async (req, res) => {
 router.get('/:slug', async (req, res) => {
   try {
     const { slug } = req.params;
-    
-    // Get session from Redis
+    const { clientId } = req.query;
+
+    if (!clientId) {
+      return res.status(400).json({ error: 'Client ID is required' });
+    }
+
     const session = await redis.hgetall(`session:${slug}`);
+
     if (!session || Object.keys(session).length === 0) {
       return res.status(404).json({ error: 'Session not found' });
     }
 
-    // Get all questions for this session
-    const questionKeys = await redis.smembers(`session:${slug}:questions`);
-    const questions = [];
-
-    for (const questionId of questionKeys) {
-      const question = await redis.hgetall(`question:${questionId}`);
-      if (question && Object.keys(question).length > 0) {
-        // Get upvotes for this question
-        const upvotes = await redis.smembers(`question:${questionId}:upvotes`);
-        questions.push({
-          ...question,
-          upvoteCount: parseInt(question.upvoteCount || '0'),
-          isAnswered: question.isAnswered === 'true',
-          isAnonymous: question.isAnonymous === 'true',
-          upvotes: upvotes.map(clientId => ({ questionId, clientId }))
-        });
-      }
+    // Check if this client has visited this session before
+    const hasVisited = await redis.sismember(`session:${slug}:participants`, clientId);
+    
+    if (!hasVisited) {
+      // Add client to participants set
+      await redis.sadd(`session:${slug}:participants`, clientId);
+      
+      // Increment participant count
+      await redis.hincrby(`session:${slug}`, 'participantCount', 1);
+      
+      // Increment total participants using stats service
+      await statsService.incrementStats('participant');
     }
 
-    // Sort questions by upvotes and creation time
-    questions.sort((a, b) => {
-      if (b.upvoteCount !== a.upvoteCount) {
-        return b.upvoteCount - a.upvoteCount;
-      }
-      return new Date(b.createdAt) - new Date(a.createdAt);
-    });
+    // Get questions for this session
+    const questions = await redis.lrange(`session:${slug}:questions`, 0, -1);
+    const parsedQuestions = questions.map(q => JSON.parse(q));
+
+    // For each question, check if the current client has upvoted it
+    const questionsWithUpvoteStatus = await Promise.all(
+      parsedQuestions.map(async (question) => {
+        const hasUpvoted = await redis.exists(`upvote:${question.id}:${clientId}`);
+        return { ...question, hasUpvoted };
+      })
+    );
+
+    // Sort questions by upvote count (descending)
+    const sortedQuestions = questionsWithUpvoteStatus.sort((a, b) => b.upvote_count - a.upvote_count);
 
     res.json({
       session: {
         ...session,
-        createdAt: new Date(session.createdAt),
-        updatedAt: new Date(session.updatedAt)
+        slug,
+        participantCount: parseInt(session.participantCount || 0)
       },
-      questions
+      questions: sortedQuestions
     });
-  } catch (err) {
-    console.error('Error fetching session:', err);
+  } catch (error) {
+    console.error('Error fetching session:', error);
     res.status(500).json({ error: 'Error fetching session' });
   }
 });
