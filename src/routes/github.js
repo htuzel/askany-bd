@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const redis = require('../config/redis');
 const axios = require('axios');
+const redis = require('../config/redis');
 
 // Cache duration in seconds (6 hours)
 const CACHE_DURATION = 6 * 60 * 60;
@@ -16,7 +16,7 @@ router.get('/stars', async (req, res) => {
     }
 
     // If not in cache, fetch from GitHub API
-    const response = await axios.get('https://api.github.com/repos/htuzel/askany', {
+    const response = await axios.get('https://api.github.com/repos/htuzel/ama-flalingo', {
       headers: {
         'Accept': 'application/vnd.github.v3+json',
         'User-Agent': 'askany-app'
@@ -38,7 +38,8 @@ router.get('/stars', async (req, res) => {
       return res.json({ stars: parseInt(cachedStars) });
     }
 
-    res.status(500).json({ error: 'Error fetching GitHub stars', stars: 0 });
+    // If no cached value exists, return 0
+    res.status(200).json({ stars: 0 });
   }
 });
 
