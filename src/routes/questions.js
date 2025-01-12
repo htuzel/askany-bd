@@ -21,6 +21,7 @@ router.post('/', async (req, res) => {
       nickname: is_anonymous ? null : nickname,
       is_anonymous,
       is_answered: false,
+      is_spotlight: session.mode === 'normal',
       upvote_count: 0,
       created_at: new Date().toISOString()
     };
@@ -113,6 +114,39 @@ router.patch('/:questionId/answer', async (req, res) => {
   } catch (error) {
     console.error('Error marking question as answered:', error);
     res.status(500).json({ error: 'Error marking question as answered' });
+  }
+});
+
+// Mark question as spotlight
+router.patch('/:questionId/spotlight', async (req, res) => {
+  try {
+    const { questionId } = req.params;
+    const { sessionSlug } = req.body;
+
+    // Get all questions for the session
+    const questionsData = await redis.lrange(`session:${sessionSlug}:questions`, 0, -1);
+    const questions = questionsData.map(q => JSON.parse(q));
+    
+    // Find the target question
+    const questionIndex = questions.findIndex(q => q.id === questionId);
+    if (questionIndex === -1) {
+      return res.status(404).json({ error: 'Question not found' });
+    }
+
+    // Update question
+    questions[questionIndex].is_spotlight = true;
+
+    // Update in Redis
+    await redis.lset(
+      `session:${sessionSlug}:questions`,
+      questionIndex,
+      JSON.stringify(questions[questionIndex])
+    );
+
+    res.json(questions[questionIndex]);
+  } catch (error) {
+    console.error('Error marking question as spotlight:', error);
+    res.status(500).json({ error: 'Error marking question as spotlight' });
   }
 });
 

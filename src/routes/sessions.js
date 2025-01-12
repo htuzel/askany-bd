@@ -22,19 +22,56 @@ router.get('/stats', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const slug = uuidv4().slice(0, 32);
+    const mode = 'normal'; // Default mode
+    const creatorId = req.body.clientId;
+
+    if (!creatorId) {
+      return res.status(400).json({ error: 'Client ID is required' });
+    }
+
     await redis.hset(`session:${slug}`, {
       title: req.body.title || '',
       createdAt: new Date().toISOString(),
-      participantCount: '0'
+      participantCount: '0',
+      mode,
+      creatorId
     });
     
     // Increment total sessions using stats service
     await statsService.incrementStats('session');
     
-    res.json({ slug });
+    res.json({ 
+      slug,
+      isOwner: true,
+      mode
+    });
   } catch (error) {
     console.error('Error creating session:', error);
     res.status(500).json({ error: 'Error creating session' });
+  }
+});
+
+// Update session mode
+router.patch('/:slug/mode', async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const { mode } = req.body;
+
+    if (!['normal', 'spotlight'].includes(mode)) {
+      return res.status(400).json({ error: 'Invalid mode' });
+    }
+
+    const session = await redis.hgetall(`session:${slug}`);
+    if (!session || Object.keys(session).length === 0) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    await redis.hset(`session:${slug}`, 'mode', mode);
+
+    res.json({ message: 'Session mode updated', mode });
+  } catch (error) {
+    console.error('Error updating session mode:', error);
+    res.status(500).json({ error: 'Error updating session mode' });
   }
 });
 
@@ -72,21 +109,48 @@ router.get('/:slug', async (req, res) => {
     const questions = await redis.lrange(`session:${slug}:questions`, 0, -1);
     const parsedQuestions = questions.map(q => JSON.parse(q));
 
+    // Determine if the client is the session creator
+    const isOwner = clientId === session.creatorId;
+
+    // Filter questions based on visibility rules
+    const questionsToReturn = parsedQuestions.filter(question => {
+      if (isOwner) return true; // Session creator sees all
+      if (question.clientId === clientId) return true; // User sees their own questions
+      if (session.mode === 'normal') return true; // Everyone sees all in normal mode
+      return question.is_spotlight; // In spotlight mode, only show spotlight questions
+    });
+
     // For each question, check if the current client has upvoted it
     const questionsWithUpvoteStatus = await Promise.all(
-      parsedQuestions.map(async (question) => {
+      questionsToReturn.map(async (question) => {
         const hasUpvoted = await redis.exists(`upvote:${question.id}:${clientId}`);
-        return { ...question, hasUpvoted };
+        return { 
+          ...question,
+          hasUpvoted,
+          isOwn: question.clientId === clientId
+        };
       })
     );
 
     // Sort questions by upvote count (descending)
     const sortedQuestions = questionsWithUpvoteStatus.sort((a, b) => b.upvote_count - a.upvote_count);
 
+    console.log('Session response:', { // Debug log
+      session: {
+        ...session,
+        slug,
+        isOwner,
+        mode: session.mode,
+        participantCount: parseInt(session.participantCount || 0)
+      }
+    });
+
     res.json({
       session: {
         ...session,
         slug,
+        isOwner,
+        mode: session.mode,
         participantCount: parseInt(session.participantCount || 0)
       },
       questions: sortedQuestions
