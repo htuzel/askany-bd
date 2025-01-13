@@ -76,12 +76,14 @@ class StatsService {
     try {
       // Get stats from Redis
       const redisStats = await redis.hgetall('app:stats');
+      const stars = await redis.get('github:stars');
       
       if (Object.keys(redisStats).length) {
         return {
           totalSessions: parseInt(redisStats.totalSessions),
           totalParticipants: parseInt(redisStats.totalParticipants),
-          lastUpdated: redisStats.lastUpdated
+          lastUpdated: redisStats.lastUpdated,
+          stars: parseInt(stars)
         };
       }
 
